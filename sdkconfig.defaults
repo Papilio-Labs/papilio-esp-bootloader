@@ -1,0 +1,21 @@
+# Espressif IoT Development Framework (ESP-IDF) minimal configuration
+# for Papilio ESP Bootloader Phase 1 test app.
+#
+CONFIG_IDF_TARGET="esp32s3"
+
+# Primary console must be USB Serial/JTAG (matches FPGA-Companion's convention —
+# this board only wires out the USB port, not UART0).
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# ── Partition table: 3-slot factory/ota_0/ota_1 layout ─────────────────────
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_loader.csv"
+# Set to match your actual flash chip size (4 MB is typical for SuperMini ESP32-S3)
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+# ────────────────────────────────────────────────────────────────────────────
+
+# ── App rollback: auto-revert otadata to the previous ota_0/ota_1 slot if the
+# newly flashed app never confirms itself (crash-loops) — Phase 1 tests this.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+# ────────────────────────────────────────────────────────────────────────────

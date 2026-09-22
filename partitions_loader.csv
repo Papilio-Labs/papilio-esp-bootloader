@@ -1,0 +1,43 @@
+# Papilio ESP Bootloader partition table — 4 MB flash
+#
+# Three-slot layout: an always-present `factory` partition (the loader itself)
+# plus `ota_0`/`ota_1` for the user app (e.g. FPGA-Companion), so the loader can
+# always be reached/recovered independent of what's flashed into the app slots.
+# See papilio-works/plans/2026-09-21-papilio-esp-bootloader.md for the full design.
+#
+# Flash layout (4 MB = 0x400000 bytes):
+#
+#   0x000000  Bootloader (ESP-IDF second-stage)
+#   0x008000  Partition table
+#   0x009000  nvs_loader   (12 KB)  — loader's OWN WiFi creds, isolated from user-app NVS
+#   0x00C000  otadata      (8 KB)   — blank/invalid => bootloader falls back to `factory`
+#   0x00E000  nvs          (24 KB)  — user app's own NVS (settings, etc.)
+#   0x020000  factory      (768 KB) — Papilio ESP Bootloader (this repo)
+#   0x0E0000  ota_0        (1.5625 MB) — user app slot 1 (e.g. FPGA-Companion)
+#   0x270000  ota_1        (1.5625 MB) — user app slot 2 (rollback safety net)
+#   0x400000  end of flash
+#
+# App partition offsets are left blank so gen_esp32part.py auto-aligns them to
+# the required 0x10000 (64 KB) boundary — the 0x14000-0x20000 gap after `nvs`
+# is unavoidable padding from that alignment rule, not wasted space we can claim.
+#
+# Sized against the measured FPGA-Companion v1.1.1 binary (1,522,528 bytes /
+# ~1.45 MB, see fpga-companion-architecture repo memory) — ota_0/ota_1 give it
+# ~115 KB headroom each. `factory` (768 KB) is sized for the loader's eventual
+# WiFi + OTA HTTP + JTAG + USB-serial code, without any of FPGA-Companion's
+# BT HID / core / menu / OSD code — revisit if that estimate proves too tight.
+#
+# IMPORTANT: board must have 4 MB (or larger) flash. Verify with: esptool.py flash_id
+#
+# To use: add to sdkconfig.defaults (or run idf.py menuconfig):
+#   CONFIG_PARTITION_TABLE_CUSTOM=y
+#   CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_loader.csv"
+#   CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# Name,       Type, SubType,  Offset,   Size,      Flags
+nvs_loader,   data, nvs,      0x9000,   0x3000,
+otadata,      data, ota,      0xC000,   0x2000,
+nvs,          data, nvs,      0xE000,   0x6000,
+factory,      app,  factory,  ,         0xC0000,
+ota_0,        app,  ota_0,    ,         0x190000,
+ota_1,        app,  ota_1,    ,         0x190000,
