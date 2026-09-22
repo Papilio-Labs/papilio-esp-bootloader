@@ -1,0 +1,19 @@
+menu "Papilio ESP Bootloader WiFi"
+    config LOADER_WIFI_SSID
+        string "WiFi SSID"
+        default "YourSSID"
+        help
+            SSID of the WiFi network the loader connects to. Overridden at
+            runtime by an "nvs_loader" partition NVS entry
+            (namespace "wifi_cfg", key "ssid") if one is present -- see
+            wifi_init.c. Set the real value in sdkconfig.defaults.local
+            (gitignored), not here, to avoid committing credentials.
+
+    config LOADER_WIFI_PASSWORD
+        string "WiFi Password"
+        default "YourPassword"
+        help
+            Password for LOADER_WIFI_SSID. Overridden at runtime by the
+            "nvs_loader" partition NVS entry (namespace "wifi_cfg", key
+            "pass") if one is present -- see wifi_init.c.
+endmenu

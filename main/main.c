@@ -1,12 +1,12 @@
 /*
- * Phase 1 throwaway test app: no WiFi, no OTA, no JTAG — just proves the
- * three-slot partition table + otadata-fallback mechanism works before any
- * real loader code is written. See
- * papilio-works/plans/2026-09-21-papilio-esp-bootloader.md, Phase 1.
+ * Phase 1 proved the three-slot partition table + otadata-fallback mechanism
+ * (see papilio-works/plans/2026-09-21-papilio-esp-bootloader.md, Phase 1).
  *
- * This file is expected to grow into the real loader starting in Phase 2
- * (jtag_gowin.c + WiFi bring-up get added alongside it), not be thrown away
- * wholesale.
+ * Phase 2 adds just enough to validate JTAG programming standalone in the
+ * loader: WiFi station bring-up (wifi_init.c) and a bare-bones HTTP endpoint
+ * (http_server.c) wired to the ported jtag_gowin.c driver. FPGA-Companion
+ * keeps its own unmodified JTAG/WiFi code throughout this phase -- nothing
+ * is removed there until Phase 6.
  */
 #include <inttypes.h>
 #include "freertos/FreeRTOS.h"
@@ -16,6 +16,9 @@
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "led_strip.h"
+
+#include "wifi_init.h"
+#include "http_server.h"
 
 static const char *TAG = "loader-phase1";
 
@@ -55,8 +58,12 @@ void app_main(void)
     ESP_LOGI(TAG, "Reset reason: %d", reason);
     ESP_LOGI(TAG, "================================================");
 
+    wifi_init_start();
+    loader_http_server_start();
+
     while (1) {
-        ESP_LOGI(TAG, "alive -- running from '%s'", running->label);
+        ESP_LOGI(TAG, "alive -- running from '%s' -- wifi=%s", running->label,
+                 wifi_init_is_connected() ? "connected" : "disconnected");
         vTaskDelay(pdMS_TO_TICKS(2000));
     }
 }

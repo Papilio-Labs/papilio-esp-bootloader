@@ -974,6 +974,13 @@ CONFIG_PARTITION_TABLE_MD5=y
 # end of Partition Table
 
 #
+# Papilio ESP Bootloader WiFi
+#
+CONFIG_LOADER_WIFI_SSID="YourSSID"
+CONFIG_LOADER_WIFI_PASSWORD="YourPassword"
+# end of Papilio ESP Bootloader WiFi
+
+#
 # Compiler options
 #
 # default:

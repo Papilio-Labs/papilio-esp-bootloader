@@ -1,0 +1,5 @@
+# Local WiFi credentials for the loader's own WiFi bring-up (wifi_init.c).
+# Copy this file to sdkconfig.defaults.local and fill in your values.
+# sdkconfig.defaults.local is gitignored and will never be committed.
+CONFIG_LOADER_WIFI_SSID="YourSSID"
+CONFIG_LOADER_WIFI_PASSWORD="YourPassword"

@@ -1,5 +1,5 @@
 # Espressif IoT Development Framework (ESP-IDF) minimal configuration
-# for Papilio ESP Bootloader Phase 1 test app.
+# for Papilio ESP Bootloader.
 #
 CONFIG_IDF_TARGET="esp32s3"
 
@@ -18,4 +18,10 @@ CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
 # ── App rollback: auto-revert otadata to the previous ota_0/ota_1 slot if the
 # newly flashed app never confirms itself (crash-loops) — Phase 1 tests this.
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+# ────────────────────────────────────────────────────────────────────────────
+
+# ── Phase 2: WiFi + bare-bones JTAG HTTP endpoint ──────────────────────────
+# WiFi is always started (no USB-presence gating) -- see wifi_init.c and
+# papilio-works/plans/2026-09-21-papilio-esp-bootloader.md.
+CONFIG_ESP_WIFI_ENABLED=y
 # ────────────────────────────────────────────────────────────────────────────
