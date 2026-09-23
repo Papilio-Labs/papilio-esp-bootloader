@@ -116,10 +116,11 @@ static esp_err_t handle_status(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_sendstr(req,
-        "Papilio ESP Bootloader (Phase 3 -- JTAG + app flashing)\n"
+        "Papilio ESP Bootloader\n"
         "POST /fpga-jtag-sram -- program FPGA SRAM via JTAG (.bin bitstream)\n"
         "POST /update -- flash ESP32 app into inactive ota_0/ota_1 slot and boot it\n"
-        "GET  /update-target -- show which slot the next /update would target\n");
+        "GET  /update-target -- show which slot the next /update would target\n"
+        "POST /resume -- boot into the already-flashed user app, no re-upload needed\n");
     return ESP_OK;
 }
 
@@ -183,6 +184,22 @@ const esp_partition_t *loader_get_target_update_partition(void)
 void loader_save_last_slot(uint8_t slot_idx)
 {
     save_last_slot(slot_idx);
+}
+
+/* Phase 5: the slot loader_get_target_update_partition() would write next is
+ * always the *inactive* one -- the resume slot is the other one (whichever
+ * was actually last booted/flashed). Doesn't validate the image here; the
+ * caller checks for a plausible app magic byte before committing to it. */
+const esp_partition_t *loader_get_resume_partition(void)
+{
+    const esp_partition_t *next_target = loader_get_target_update_partition();
+    if (!next_target) {
+        return NULL;
+    }
+    esp_partition_subtype_t other = (next_target->subtype == ESP_PARTITION_SUBTYPE_APP_OTA_0)
+                                        ? ESP_PARTITION_SUBTYPE_APP_OTA_1
+                                        : ESP_PARTITION_SUBTYPE_APP_OTA_0;
+    return esp_partition_find_first(ESP_PARTITION_TYPE_APP, other, NULL);
 }
 
 static esp_err_t handle_update_target(httpd_req_t *req)
@@ -292,6 +309,45 @@ static esp_err_t handle_update(httpd_req_t *req)
     ESP_LOGI(TAG, "App update complete (%d bytes) -> '%s'. Rebooting in 1 s ...", written, target->label);
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_sendstr(req, "App update successful. Rebooting into new slot...\r\n");
+
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
+
+    return ESP_OK; /* unreachable */
+}
+
+/* Return to the already-flashed user app without re-uploading it -- e.g.
+ * after a Tier-1 otadata-erase recovery, or after only flashing an FPGA
+ * bitstream via /fpga-jtag-sram and never touching the ESP32 app slots. */
+static esp_err_t handle_resume(httpd_req_t *req)
+{
+    const esp_partition_t *target = loader_get_resume_partition();
+    if (!target) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "No resume target found");
+        return ESP_FAIL;
+    }
+
+    uint8_t magic = 0;
+    esp_err_t err = esp_partition_read(target, 0, &magic, 1);
+    if (err != ESP_OK || magic != 0xE9) {
+        ESP_LOGW(TAG, "Resume target '%s' has no valid app image (magic=0x%02x)", target->label, magic);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Resume target has no valid app image");
+        return ESP_FAIL;
+    }
+
+    err = esp_ota_set_boot_partition(target);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_ota_set_boot_partition: %s", esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Set boot partition failed");
+        return ESP_FAIL;
+    }
+    loader_save_last_slot((uint8_t)(target->subtype - ESP_PARTITION_SUBTYPE_APP_OTA_0));
+
+    ESP_LOGI(TAG, "Resuming user app '%s'. Rebooting in 1 s ...", target->label);
+    char buf[96];
+    int n = snprintf(buf, sizeof(buf), "Resuming '%s'. Rebooting...\r\n", target->label);
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_send(req, buf, n);
 
     vTaskDelay(pdMS_TO_TICKS(1000));
     esp_restart();
@@ -410,14 +466,19 @@ void loader_http_server_start(void)
     static const httpd_uri_t update_target_uri = {
         .uri = "/update-target", .method = HTTP_GET, .handler = handle_update_target,
     };
+    static const httpd_uri_t resume_uri = {
+        .uri = "/resume", .method = HTTP_POST, .handler = handle_resume,
+    };
 
     httpd_register_uri_handler(server, &status_uri);
     httpd_register_uri_handler(server, &fpga_jtag_sram_uri);
     httpd_register_uri_handler(server, &update_uri);
     httpd_register_uri_handler(server, &update_target_uri);
+    httpd_register_uri_handler(server, &resume_uri);
 
     ESP_LOGI(TAG, "HTTP server started on port %d", LOADER_HTTP_PORT);
     ESP_LOGI(TAG, "  curl -X POST http://<device-ip>:%d/fpga-jtag-sram --data-binary @bitstream.bin", LOADER_HTTP_PORT);
     ESP_LOGI(TAG, "  curl -X POST http://<device-ip>:%d/update --data-binary @app.bin", LOADER_HTTP_PORT);
     ESP_LOGI(TAG, "  curl http://<device-ip>:%d/update-target", LOADER_HTTP_PORT);
+    ESP_LOGI(TAG, "  curl -X POST http://<device-ip>:%d/resume  -- return to the existing user app", LOADER_HTTP_PORT);
 }

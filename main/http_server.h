@@ -10,8 +10,9 @@
 
 /**
  * Start the loader's bare-bones HTTP server: JTAG SRAM programming
- * (Phase 2) and inactive-slot ESP32 app flashing (Phase 3). Call after
- * WiFi is connected. Endpoint shape is not final; see Phase 4 of
+ * (Phase 2), inactive-slot ESP32 app flashing (Phase 3), and returning to
+ * the user-app slot without re-flashing (Phase 5). Call after WiFi is
+ * connected. Endpoint shape is not final; see Phase 4 of
  * papilio-works/plans/2026-09-21-papilio-esp-bootloader.md for the
  * USB-serial fallback that extends this later.
  */
@@ -41,5 +42,16 @@ esp_err_t loader_jtag_program_sram_begin_with_retry(uint32_t *idcode_out);
  */
 const esp_partition_t *loader_get_target_update_partition(void);
 void loader_save_last_slot(uint8_t slot_idx);
+
+/*
+ * Phase 5: recovery-ladder testing needs a way back into the existing,
+ * already-flashed user app without re-uploading its image (e.g. after a
+ * Tier-1 otadata-erase recovery, or after only flashing an FPGA bitstream
+ * via /fpga-jtag-sram). Resolves the *other* slot from
+ * loader_get_target_update_partition() (i.e. the one NOT targeted for the
+ * next write -- the one that was actually last booted/flashed), and only
+ * returns it if it looks like a genuine app image (not blank/erased flash).
+ */
+const esp_partition_t *loader_get_resume_partition(void);
 
 #endif /* LOADER_HTTP_SERVER_H */
