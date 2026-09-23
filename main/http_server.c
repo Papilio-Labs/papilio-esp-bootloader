@@ -68,6 +68,50 @@ static SemaphoreHandle_t ensure_jtag_mutex(void)
     return s_jtag_mutex;
 }
 
+bool loader_jtag_lock(TickType_t timeout_ticks)
+{
+    return xSemaphoreTake(ensure_jtag_mutex(), timeout_ticks) == pdTRUE;
+}
+
+void loader_jtag_unlock(void)
+{
+    xSemaphoreGive(s_jtag_mutex);
+}
+
+esp_err_t loader_jtag_ensure_init(void)
+{
+    if (!s_jtag_initialized) {
+        if (jtag_gowin_init(NULL) != ESP_OK) {
+            return ESP_FAIL;
+        }
+        s_jtag_initialized = true;
+    }
+    return ESP_OK;
+}
+
+/* JTAG SRAM programming can lose a race against the FPGA's own SPI-flash
+ * auto-config FSM on the first attempt (mirrors FPGA-Companion's
+ * ota_server.c retry loop) -- pulse RECONFIG_N and retry up to 3x with
+ * increasing settle time before giving up. Shared by HTTP and USB-serial
+ * (Phase 4) so neither reimplements the retry loop. */
+esp_err_t loader_jtag_program_sram_begin_with_retry(uint32_t *idcode_out)
+{
+    const int MAX_JTAG_BEGIN_ATTEMPTS = 3;
+    esp_err_t begin_err = ESP_FAIL;
+    for (int attempt = 1; attempt <= MAX_JTAG_BEGIN_ATTEMPTS; attempt++) {
+        fpga_reconfig_pulse();
+        esp_rom_delay_us(2000 + attempt * 1000);  /* 3 ms, 4 ms, 5 ms */
+
+        begin_err = jtag_gowin_program_sram_begin(idcode_out);
+        if (begin_err == ESP_OK) {
+            break;
+        }
+        ESP_LOGW(TAG, "JTAG sram_begin attempt %d/%d failed: %s",
+                 attempt, MAX_JTAG_BEGIN_ATTEMPTS, esp_err_to_name(begin_err));
+    }
+    return begin_err;
+}
+
 static esp_err_t handle_status(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/plain");
@@ -114,7 +158,7 @@ static void save_last_slot(uint8_t slot_idx)
  * so fall back to the last-flashed slot persisted in nvs_loader (survives
  * the erase) and target its opposite. Never returns `factory` -- it's not
  * an OTA subtype. */
-static const esp_partition_t *get_target_update_partition(void)
+const esp_partition_t *loader_get_target_update_partition(void)
 {
     const esp_partition_t *boot = esp_ota_get_boot_partition();
     if (boot && boot->type == ESP_PARTITION_TYPE_APP &&
@@ -136,9 +180,14 @@ static const esp_partition_t *get_target_update_partition(void)
     return esp_ota_get_next_update_partition(NULL); /* fresh board, no memory anywhere -- default ota_0 */
 }
 
+void loader_save_last_slot(uint8_t slot_idx)
+{
+    save_last_slot(slot_idx);
+}
+
 static esp_err_t handle_update_target(httpd_req_t *req)
 {
-    const esp_partition_t *target = get_target_update_partition();
+    const esp_partition_t *target = loader_get_target_update_partition();
     char buf[128];
     int n = snprintf(buf, sizeof(buf), "next /update target: %s (offset=0x%06" PRIx32 ")\n",
                       target ? target->label : "(none)", target ? target->address : 0);
@@ -154,7 +203,7 @@ static esp_err_t handle_update(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    const esp_partition_t *target = get_target_update_partition();
+    const esp_partition_t *target = loader_get_target_update_partition();
     if (!target) {
         ESP_LOGE(TAG, "No OTA update partition found -- check partition table");
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
@@ -238,7 +287,7 @@ static esp_err_t handle_update(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Set boot partition failed");
         return ESP_FAIL;
     }
-    save_last_slot((uint8_t)(target->subtype - ESP_PARTITION_SUBTYPE_APP_OTA_0));
+    loader_save_last_slot((uint8_t)(target->subtype - ESP_PARTITION_SUBTYPE_APP_OTA_0));
 
     ESP_LOGI(TAG, "App update complete (%d bytes) -> '%s'. Rebooting in 1 s ...", written, target->label);
     httpd_resp_set_type(req, "text/plain");
@@ -257,51 +306,32 @@ static esp_err_t handle_fpga_jtag_sram(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    if (xSemaphoreTake(ensure_jtag_mutex(), 0) != pdTRUE) {
+    if (!loader_jtag_lock(0)) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "JTAG programming already in progress");
         return ESP_FAIL;
     }
 
     ESP_LOGI(TAG, "FPGA JTAG SRAM programming started: %d bytes", req->content_len);
 
-    if (!s_jtag_initialized) {
-        if (jtag_gowin_init(NULL) != ESP_OK) {
-            ESP_LOGE(TAG, "JTAG initialization failed");
-            xSemaphoreGive(s_jtag_mutex);
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "JTAG init failed");
-            return ESP_FAIL;
-        }
-        s_jtag_initialized = true;
+    if (loader_jtag_ensure_init() != ESP_OK) {
+        ESP_LOGE(TAG, "JTAG initialization failed");
+        loader_jtag_unlock();
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "JTAG init failed");
+        return ESP_FAIL;
     }
 
-    /* JTAG SRAM programming can lose a race against the FPGA's own SPI-flash
-     * auto-config FSM on the first attempt (mirrors FPGA-Companion's
-     * ota_server.c retry loop) -- pulse RECONFIG_N and retry up to 3x with
-     * increasing settle time before giving up. */
-    const int MAX_JTAG_BEGIN_ATTEMPTS = 3;
     uint32_t idcode = 0;
-    esp_err_t begin_err = ESP_FAIL;
-    for (int attempt = 1; attempt <= MAX_JTAG_BEGIN_ATTEMPTS; attempt++) {
-        fpga_reconfig_pulse();
-        esp_rom_delay_us(2000 + attempt * 1000);  /* 3 ms, 4 ms, 5 ms */
-
-        begin_err = jtag_gowin_program_sram_begin(&idcode);
-        if (begin_err == ESP_OK) {
-            break;
-        }
-        ESP_LOGW(TAG, "JTAG sram_begin attempt %d/%d failed: %s",
-                 attempt, MAX_JTAG_BEGIN_ATTEMPTS, esp_err_to_name(begin_err));
-    }
+    esp_err_t begin_err = loader_jtag_program_sram_begin_with_retry(&idcode);
     if (begin_err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to begin JTAG programming (FPGA not detected?)");
-        xSemaphoreGive(s_jtag_mutex);
+        loader_jtag_unlock();
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "FPGA not detected via JTAG");
         return ESP_FAIL;
     }
 
     char *chunk_buf = malloc(RECV_CHUNK_SIZE);
     if (!chunk_buf) {
-        xSemaphoreGive(s_jtag_mutex);
+        loader_jtag_unlock();
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
         return ESP_FAIL;
     }
@@ -336,20 +366,20 @@ static esp_err_t handle_fpga_jtag_sram(httpd_req_t *req)
     free(chunk_buf);
 
     if (error) {
-        xSemaphoreGive(s_jtag_mutex);
+        loader_jtag_unlock();
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Programming failed");
         return ESP_FAIL;
     }
 
     if (jtag_gowin_program_sram_end() != ESP_OK) {
         ESP_LOGE(TAG, "JTAG programming end failed");
-        xSemaphoreGive(s_jtag_mutex);
+        loader_jtag_unlock();
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Programming failed");
         return ESP_FAIL;
     }
 
     ESP_LOGI(TAG, "FPGA JTAG SRAM programming complete! (%d bytes)", received);
-    xSemaphoreGive(s_jtag_mutex);
+    loader_jtag_unlock();
 
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_sendstr(req, "FPGA programmed successfully via JTAG!\n");
