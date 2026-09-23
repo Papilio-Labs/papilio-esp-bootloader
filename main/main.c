@@ -2,11 +2,12 @@
  * Phase 1 proved the three-slot partition table + otadata-fallback mechanism
  * (see papilio-works/plans/2026-09-21-papilio-esp-bootloader.md, Phase 1).
  *
- * Phase 2 adds just enough to validate JTAG programming standalone in the
- * loader: WiFi station bring-up (wifi_init.c) and a bare-bones HTTP endpoint
- * (http_server.c) wired to the ported jtag_gowin.c driver. FPGA-Companion
- * keeps its own unmodified JTAG/WiFi code throughout this phase -- nothing
- * is removed there until Phase 6.
+ * Phase 2 added WiFi station bring-up (wifi_init.c) and a bare-bones HTTP
+ * endpoint (http_server.c) wired to the ported jtag_gowin.c driver, proving
+ * standalone JTAG programming. Phase 3 adds POST /update, which flashes an
+ * ESP32 app image into whichever ota_0/ota_1 slot isn't currently selected
+ * to boot, then reboots into it. FPGA-Companion keeps its own unmodified
+ * JTAG/OTA/WiFi code throughout -- nothing is removed there until Phase 6.
  */
 #include <inttypes.h>
 #include "freertos/FreeRTOS.h"
