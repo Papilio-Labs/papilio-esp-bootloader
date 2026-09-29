@@ -36,6 +36,7 @@ static const char *TAG = "wifi_init";
 static EventGroupHandle_t s_wifi_event_group = NULL;
 static int s_retry_num = 0;
 static volatile bool s_connected = false;
+static esp_ip4_addr_t s_ip_addr = {0};
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                 int32_t event_id, void *event_data)
@@ -46,6 +47,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         wifi_event_sta_disconnected_t *disc = (wifi_event_sta_disconnected_t *)event_data;
         s_connected = false;
+        s_ip_addr = (esp_ip4_addr_t){0};
         ESP_LOGW(TAG, "STA_DISCONNECTED reason=%d", disc ? disc->reason : -1);
         if (s_retry_num < WIFI_MAX_RETRIES) {
             esp_wifi_connect();
@@ -58,6 +60,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "WiFi connected - IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        s_ip_addr = event->ip_info.ip;
         s_retry_num = 0;
         s_connected = true;
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
@@ -152,4 +155,9 @@ void wifi_init_start(void)
 bool wifi_init_is_connected(void)
 {
     return s_connected;
+}
+
+esp_ip4_addr_t wifi_init_get_ip(void)
+{
+    return s_ip_addr;
 }

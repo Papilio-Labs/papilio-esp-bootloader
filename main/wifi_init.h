@@ -2,6 +2,7 @@
 #define WIFI_INIT_H
 
 #include <stdbool.h>
+#include "esp_netif.h"
 
 /**
  * Bring up WiFi in station mode and block (up to ~15s) until connected or
@@ -19,5 +20,8 @@ void wifi_init_start(void);
 
 /** True once WiFi STA has an IP address. */
 bool wifi_init_is_connected(void);
+
+/** Return the current station IPv4 address, or 0.0.0.0 when disconnected. */
+esp_ip4_addr_t wifi_init_get_ip(void);
 
 #endif /* WIFI_INIT_H */

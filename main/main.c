@@ -74,8 +74,11 @@ void app_main(void)
     serial_flash_start();
 
     while (1) {
-        ESP_LOGI(TAG, "alive -- running from '%s' -- wifi=%s", running->label,
-                 wifi_init_is_connected() ? "connected" : "disconnected");
+        esp_ip4_addr_t ip_addr = wifi_init_get_ip();
+        ESP_LOGI(TAG, "alive -- running from '%s' -- wifi=%s ip=" IPSTR,
+                 running->label,
+                 wifi_init_is_connected() ? "connected" : "disconnected",
+                 IP2STR(&ip_addr));
         vTaskDelay(pdMS_TO_TICKS(2000));
     }
 }
