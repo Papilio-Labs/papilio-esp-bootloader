@@ -30,6 +30,7 @@ static const char *TAG = "spi_flash_bridge";
 #define PIN_NUM_MOSI 2
 #define PIN_NUM_CLK  1
 #define PIN_NUM_FLASH_CS 3
+#define PIN_NUM_LED_CLEAR_N 9
 #define PIN_NUM_RECONFIG_N 13
 
 static esp_flash_t *s_ext_flash = NULL;
@@ -63,6 +64,9 @@ void spi_flash_bridge_init(void)
 
     ESP_LOGI(TAG, "Initializing external SPI flash bus: MISO=%d SCK=%d MOSI=%d CS=%d RECONFIG_N=%d",
              PIN_NUM_MISO, PIN_NUM_CLK, PIN_NUM_MOSI, PIN_NUM_FLASH_CS, PIN_NUM_RECONFIG_N);
+
+    gpio_set_direction(PIN_NUM_LED_CLEAR_N, GPIO_MODE_OUTPUT);
+    gpio_set_level(PIN_NUM_LED_CLEAR_N, 1);
 
     spi_bus_config_t buscfg = {
         .miso_io_num     = PIN_NUM_MISO,
@@ -195,9 +199,16 @@ void spi_flash_bridge_unlock(void)
 void spi_flash_bridge_fpga_reset(void)
 {
     ESP_LOGI(TAG, "FPGA RESET (cold boot from flash)");
+
+    /* The bridge LED is a latched WS2812 state. Pull its sideband low long
+     * enough for the bridge to transmit a complete zero-color frame. */
+    gpio_set_level(PIN_NUM_LED_CLEAR_N, 0);
+    vTaskDelay(pdMS_TO_TICKS(5));
+
     gpio_set_direction(PIN_NUM_RECONFIG_N, GPIO_MODE_OUTPUT);
     gpio_set_level(PIN_NUM_RECONFIG_N, 0);
     vTaskDelay(pdMS_TO_TICKS(100));
     gpio_set_level(PIN_NUM_RECONFIG_N, 1);
     gpio_set_direction(PIN_NUM_RECONFIG_N, GPIO_MODE_INPUT);
+    gpio_set_direction(PIN_NUM_LED_CLEAR_N, GPIO_MODE_INPUT);
 }

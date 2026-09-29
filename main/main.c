@@ -19,8 +19,8 @@
 #include "esp_system.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
-#include "led_strip.h"
 
+#include "loader_led.h"
 #include "wifi_init.h"
 #include "http_server.h"
 #include "serial_flash.h"
@@ -28,27 +28,6 @@
 #include "spi_flash_bridge.h"
 
 static const char *TAG = "loader-phase1";
-
-/* Same WS2812 LED as FPGA-Companion (wifi_log.c): GPIO48, single pixel. */
-#define LOADER_LED_GPIO 48
-
-static void loader_led_set_purple(void)
-{
-    led_strip_handle_t strip;
-    led_strip_config_t strip_cfg = {
-        .strip_gpio_num = LOADER_LED_GPIO,
-        .max_leds       = 1,
-    };
-    led_strip_rmt_config_t rmt_cfg = {
-        .resolution_hz = 10 * 1000 * 1000,
-    };
-    if (led_strip_new_rmt_device(&strip_cfg, &rmt_cfg, &strip) != ESP_OK) {
-        return;
-    }
-    /* Solid purple identifies the bootloader/factory app (vs. FPGA-Companion's green). */
-    led_strip_set_pixel(strip, 0, 16, 0, 16);
-    led_strip_refresh(strip);
-}
 
 void app_main(void)
 {

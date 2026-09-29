@@ -31,6 +31,7 @@
 #include "http_server.h"
 #include "spi_flash_bridge.h"
 #include "fpga_bootloader.h"
+#include "loader_led.h"
 
 static const char *TAG = "http_server";
 
@@ -368,6 +369,7 @@ static esp_err_t handle_update(httpd_req_t *req)
     httpd_resp_sendstr(req, "App update successful. Rebooting into new slot...\r\n");
 
     vTaskDelay(pdMS_TO_TICKS(1000));
+    loader_led_clear();
     esp_restart();
 
     return ESP_OK; /* unreachable */
@@ -408,6 +410,7 @@ static esp_err_t handle_resume(httpd_req_t *req)
     httpd_resp_send(req, buf, n);
 
     vTaskDelay(pdMS_TO_TICKS(1000));
+    loader_led_clear();
     esp_restart();
 
     return ESP_OK; /* unreachable */

@@ -28,6 +28,7 @@
 #include "jtag_gowin.h"
 #include "spi_flash_bridge.h"
 #include "fpga_bootloader.h"
+#include "loader_led.h"
 
 static const char *TAG = "serial_flash";
 
@@ -450,6 +451,7 @@ static bool try_handle_app_flash_begin(const char *line)
         printf("APP_FLASH_OK\r\n");
         fflush(stdout);
         vTaskDelay(pdMS_TO_TICKS(1000));
+        loader_led_clear();
         esp_restart();
     } else {
         printf("APP_FLASH_ERROR %s\r\n", esp_err_to_name(err));
