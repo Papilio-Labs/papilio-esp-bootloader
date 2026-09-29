@@ -25,6 +25,7 @@
 #include "http_server.h"
 #include "serial_flash.h"
 #include "wifi_log.h"
+#include "spi_flash_bridge.h"
 
 static const char *TAG = "loader-phase1";
 
@@ -68,6 +69,7 @@ void app_main(void)
 
     wifi_init_start();
     wifi_log_start();
+    spi_flash_bridge_init();
     loader_http_server_start();
     serial_flash_start();
 

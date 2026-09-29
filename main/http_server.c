@@ -29,6 +29,8 @@
 
 #include "jtag_gowin.h"
 #include "http_server.h"
+#include "spi_flash_bridge.h"
+#include "fpga_bootloader.h"
 
 static const char *TAG = "http_server";
 
@@ -40,6 +42,58 @@ static const char *TAG = "http_server";
 
 #define RECV_CHUNK_SIZE 4096
 #define LOADER_HTTP_PORT 3232  /* matches FPGA-Companion's ota_server port, by convention */
+
+/* FPGA bitstream flash region -- shared with serial_flash.c's target=flash
+ * path so both transports erase/write the exact same address range. */
+#define FPGA_FLASH_BUF  8192
+#define FPGA_FLASH_ADDR 0x000000
+#define FPGA_FLASH_SIZE 0x200000  /* 2 MB max for FPGA bitstream */
+
+/* =========================================================================
+ * CORS support -- lets a browser-hosted page (e.g. papilioworks.com/loader)
+ * call these endpoints directly via fetch() from a different origin. Same
+ * pattern FPGA-Companion's net_recovery.c uses. Without this, every fetch()
+ * from a browser fails with a generic "Failed to fetch" (no CORS headers
+ * on the response), even though curl/esptool talking to the same endpoint
+ * works fine -- CORS is purely a browser-side restriction.
+ * ========================================================================= */
+#define LOADER_CORS_ALLOW_ORIGIN "*"
+
+static void add_cors_headers(httpd_req_t *req)
+{
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", LOADER_CORS_ALLOW_ORIGIN);
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Private-Network", "true");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type, Content-Length");
+}
+
+static esp_err_t loader_send_err_impl(httpd_req_t *req, httpd_err_code_t error, const char *msg)
+{
+    add_cors_headers(req);
+    return httpd_resp_send_err(req, error, msg);
+}
+
+static esp_err_t loader_send_str_impl(httpd_req_t *req, const char *msg)
+{
+    add_cors_headers(req);
+    return httpd_resp_sendstr(req, msg);
+}
+
+/* Redefine (not httpd_resp_send itself, to avoid recursing into these
+ * wrappers) so every existing send_err/sendstr call site below picks up
+ * CORS headers for free. Raw httpd_resp_send(...) call sites still need
+ * add_cors_headers(req) added manually right before them. */
+#define httpd_resp_send_err(req, error, msg) loader_send_err_impl(req, error, msg)
+#define httpd_resp_sendstr(req, msg)         loader_send_str_impl(req, msg)
+
+/* Generic OPTIONS preflight handler, shared by every POST endpoint below. */
+static esp_err_t handle_options_preflight(httpd_req_t *req)
+{
+    add_cors_headers(req);
+    httpd_resp_set_status(req, "204 No Content");
+    httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
+}
 
 /* Papilio Retrocade/Arcade "FPGA Reconfig" pin -- see FPGA-Companion's
  * mcu_hw.c PIN_NUM_RECONFIG_N / mcu_hw_fpga_reset_brief(). A brief low pulse
@@ -118,6 +172,8 @@ static esp_err_t handle_status(httpd_req_t *req)
     httpd_resp_sendstr(req,
         "Papilio ESP Bootloader\n"
         "POST /fpga-jtag-sram -- program FPGA SRAM via JTAG (.bin bitstream)\n"
+        "GET  /fpga-flash-id -- load the SPI bridge and read the FPGA flash JEDEC ID\n"
+        "GET  /fpga-flash-id-current -- read the FPGA flash through the currently running bridge\n"
         "POST /update -- flash ESP32 app into inactive ota_0/ota_1 slot and boot it\n"
         "GET  /update-target -- show which slot the next /update would target\n"
         "POST /resume -- boot into the already-flashed user app, no re-upload needed\n");
@@ -208,6 +264,7 @@ static esp_err_t handle_update_target(httpd_req_t *req)
     char buf[128];
     int n = snprintf(buf, sizeof(buf), "next /update target: %s (offset=0x%06" PRIx32 ")\n",
                       target ? target->label : "(none)", target ? target->address : 0);
+    add_cors_headers(req);
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_send(req, buf, n);
     return ESP_OK;
@@ -346,6 +403,7 @@ static esp_err_t handle_resume(httpd_req_t *req)
     ESP_LOGI(TAG, "Resuming user app '%s'. Rebooting in 1 s ...", target->label);
     char buf[96];
     int n = snprintf(buf, sizeof(buf), "Resuming '%s'. Rebooting...\r\n", target->label);
+    add_cors_headers(req);
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_send(req, buf, n);
 
@@ -442,11 +500,194 @@ static esp_err_t handle_fpga_jtag_sram(httpd_req_t *req)
     return ESP_OK;
 }
 
+/*
+ * POST /fpga-update -- writes a Gowin .bin bitstream into the FPGA's own
+ * external SPI flash (persistent across power cycles), unlike
+ * /fpga-jtag-sram above which only reaches volatile FPGA SRAM.
+ *
+ * To reach that flash chip at all, the FPGA first needs to be running a
+ * bitstream that bridges its pins to it -- so this handler always starts
+ * by JTAG-loading the embedded bootloader bitstream into SRAM
+ * (fpga_bootloader_load_to_sram()) before touching spi_flash_bridge.c.
+ * That temporary SRAM contents are irrelevant once done: the final
+ * spi_flash_bridge_fpga_reset() cold-boots the FPGA straight from the just
+ * -written flash contents, discarding the bootloader from SRAM.
+ *
+ * Ported from FPGA-Companion's ota_server.c handle_fpga_update(), with the
+ * BLE-scan-pause / status-LED / sysctrl-suppress-reset calls dropped --
+ * none of that exists in this minimal loader.
+ */
+static esp_err_t handle_fpga_update(httpd_req_t *req)
+{
+    if (req->content_len == 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
+        return ESP_FAIL;
+    }
+    if (req->content_len > FPGA_FLASH_SIZE) {
+        ESP_LOGE(TAG, "FPGA bitstream too large: %d bytes (max %d)", req->content_len, FPGA_FLASH_SIZE);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bitstream too large");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "FPGA persistent flash update started: %d bytes -> flash @ 0x%06x",
+             req->content_len, FPGA_FLASH_ADDR);
+
+    char *buf = malloc(FPGA_FLASH_BUF);
+    if (!buf) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Pre-loading embedded bootloader to FPGA SRAM");
+    if (fpga_bootloader_load_to_sram() != ESP_OK) {
+        free(buf);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to load bootloader to FPGA SRAM");
+        return ESP_FAIL;
+    }
+
+    /* Let the FPGA finish booting from SRAM before driving the SPI bus it now bridges. */
+    vTaskDelay(pdMS_TO_TICKS(1500));
+
+    ESP_LOGI(TAG, "Re-initializing SPI flash (FPGA SPI bridge now active)");
+    if (spi_flash_bridge_reinit() != ESP_OK) {
+        free(buf);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "SPI flash not accessible after SRAM bootloader load");
+        return ESP_FAIL;
+    }
+
+    spi_flash_bridge_lock();
+
+    ESP_LOGI(TAG, "Erasing flash region @ 0x%06x (%d bytes)", FPGA_FLASH_ADDR, FPGA_FLASH_SIZE);
+    spi_flash_bridge_erase_region(FPGA_FLASH_ADDR, FPGA_FLASH_SIZE);
+
+    int remaining = req->content_len;
+    int written = 0;
+    uint32_t addr = FPGA_FLASH_ADDR;
+    int timeout_streak = 0;
+
+    while (remaining > 0) {
+        int to_recv = (remaining < FPGA_FLASH_BUF) ? remaining : FPGA_FLASH_BUF;
+        int recv = httpd_req_recv(req, buf, to_recv);
+
+        if (recv == HTTPD_SOCK_ERR_TIMEOUT) {
+            timeout_streak++;
+            if (timeout_streak >= 3) {
+                ESP_LOGE(TAG, "Connection stalled after %d bytes -- aborting", written);
+                free(buf);
+                spi_flash_bridge_unlock();
+                spi_flash_bridge_fpga_reset();
+                httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Upload stalled");
+                return ESP_FAIL;
+            }
+            continue;
+        }
+        timeout_streak = 0;
+
+        if (recv <= 0) {
+            ESP_LOGE(TAG, "Receive error (%d) after %d bytes written", recv, written);
+            free(buf);
+            spi_flash_bridge_unlock();
+            spi_flash_bridge_fpga_reset();
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Receive error");
+            return ESP_FAIL;
+        }
+
+        spi_flash_bridge_write(addr, (uint8_t *)buf, recv);
+        addr      += recv;
+        remaining -= recv;
+        written   += recv;
+
+        if (written % 65536 == 0 || remaining == 0) {
+            ESP_LOGI(TAG, "Progress: %d / %d bytes", written, req->content_len);
+        }
+    }
+
+    free(buf);
+    spi_flash_bridge_unlock();
+
+    ESP_LOGI(TAG, "Flash write complete (%d bytes), settling before FPGA reset", written);
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    spi_flash_bridge_fpga_reset();
+    ESP_LOGI(TAG, "FPGA reconfiguring from new persistent bitstream");
+
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_sendstr(req, "FPGA flash update successful! FPGA reconfiguring from new bitstream...\n");
+    return ESP_OK;
+}
+
+/* GET /fpga-flash-id -- load the temporary bridge and read the external
+ * FPGA flash JEDEC ID without modifying its contents. */
+static esp_err_t handle_fpga_flash_id(httpd_req_t *req)
+{
+    ESP_LOGI(TAG, "FPGA flash ID probe started");
+
+    if (fpga_bootloader_load_to_sram() != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "Failed to load bootloader to FPGA SRAM");
+        return ESP_FAIL;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(1500));
+
+    uint32_t id = 0;
+    uint32_t size_bytes = 0;
+    esp_err_t err = spi_flash_bridge_read_id(&id, &size_bytes);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "FPGA flash ID probe failed: %s", esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "SPI flash ID probe failed");
+        return ESP_FAIL;
+    }
+
+    char response[96];
+    snprintf(response, sizeof(response), "id=0x%06" PRIx32 " size=%" PRIu32 "\n",
+             id, size_bytes);
+    ESP_LOGI(TAG, "FPGA flash ID: 0x%06" PRIx32 ", size=%" PRIu32 " bytes", id, size_bytes);
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_sendstr(req, response);
+    return ESP_OK;
+}
+
+/* GET /fpga-flash-id-current -- probe the external flash through the bridge
+ * already running in FPGA SRAM. This intentionally does not load a bridge. */
+static esp_err_t handle_fpga_flash_id_current(httpd_req_t *req)
+{
+    ESP_LOGI(TAG, "Current FPGA bridge flash ID probe started");
+
+    if (spi_flash_bridge_reinit() != ESP_OK) {
+        ESP_LOGE(TAG, "Current bridge flash probe failed during SPI init");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "SPI flash not accessible through current bridge");
+        return ESP_FAIL;
+    }
+
+    uint32_t id = 0;
+    uint32_t size_bytes = 0;
+    esp_err_t err = spi_flash_bridge_read_id(&id, &size_bytes);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Current bridge flash ID probe failed: %s", esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "SPI flash ID probe failed through current bridge");
+        return ESP_FAIL;
+    }
+
+    char response[96];
+    snprintf(response, sizeof(response), "id=0x%06" PRIx32 " size=%" PRIu32 "\n",
+             id, size_bytes);
+    ESP_LOGI(TAG, "Current bridge FPGA flash ID: 0x%06" PRIx32 ", size=%" PRIu32 " bytes",
+             id, size_bytes);
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_sendstr(req, response);
+    return ESP_OK;
+}
+
 void loader_http_server_start(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = LOADER_HTTP_PORT;
     config.stack_size = 8192;
+    config.max_uri_handlers = 12;  /* 8 real routes + 4 OPTIONS preflight routes */
 
     httpd_handle_t server = NULL;
     if (httpd_start(&server, &config) != ESP_OK) {
@@ -460,6 +701,16 @@ void loader_http_server_start(void)
     static const httpd_uri_t fpga_jtag_sram_uri = {
         .uri = "/fpga-jtag-sram", .method = HTTP_POST, .handler = handle_fpga_jtag_sram,
     };
+    static const httpd_uri_t fpga_update_uri = {
+        .uri = "/fpga-update", .method = HTTP_POST, .handler = handle_fpga_update,
+    };
+    static const httpd_uri_t fpga_flash_id_uri = {
+        .uri = "/fpga-flash-id", .method = HTTP_GET, .handler = handle_fpga_flash_id,
+    };
+    static const httpd_uri_t fpga_flash_id_current_uri = {
+        .uri = "/fpga-flash-id-current", .method = HTTP_GET,
+        .handler = handle_fpga_flash_id_current,
+    };
     static const httpd_uri_t update_uri = {
         .uri = "/update", .method = HTTP_POST, .handler = handle_update,
     };
@@ -472,12 +723,27 @@ void loader_http_server_start(void)
 
     httpd_register_uri_handler(server, &status_uri);
     httpd_register_uri_handler(server, &fpga_jtag_sram_uri);
+    httpd_register_uri_handler(server, &fpga_update_uri);
+    httpd_register_uri_handler(server, &fpga_flash_id_uri);
+    httpd_register_uri_handler(server, &fpga_flash_id_current_uri);
     httpd_register_uri_handler(server, &update_uri);
     httpd_register_uri_handler(server, &update_target_uri);
     httpd_register_uri_handler(server, &resume_uri);
 
+    /* OPTIONS preflight for every POST endpoint (Chrome sends this before
+     * each cross-origin POST when Private Network Access is in play). */
+    static const char *cors_paths[] = { "/fpga-jtag-sram", "/fpga-update", "/update", "/resume" };
+    static httpd_uri_t options_uris[4];
+    for (size_t i = 0; i < sizeof(cors_paths) / sizeof(cors_paths[0]); i++) {
+        options_uris[i].uri     = cors_paths[i];
+        options_uris[i].method  = HTTP_OPTIONS;
+        options_uris[i].handler = handle_options_preflight;
+        httpd_register_uri_handler(server, &options_uris[i]);
+    }
+
     ESP_LOGI(TAG, "HTTP server started on port %d", LOADER_HTTP_PORT);
     ESP_LOGI(TAG, "  curl -X POST http://<device-ip>:%d/fpga-jtag-sram --data-binary @bitstream.bin", LOADER_HTTP_PORT);
+    ESP_LOGI(TAG, "  curl http://<device-ip>:%d/fpga-flash-id", LOADER_HTTP_PORT);
     ESP_LOGI(TAG, "  curl -X POST http://<device-ip>:%d/update --data-binary @app.bin", LOADER_HTTP_PORT);
     ESP_LOGI(TAG, "  curl http://<device-ip>:%d/update-target", LOADER_HTTP_PORT);
     ESP_LOGI(TAG, "  curl -X POST http://<device-ip>:%d/resume  -- return to the existing user app", LOADER_HTTP_PORT);

@@ -5,6 +5,8 @@ idf_component_register(SRCS
     "http_server.c"
     "serial_flash.c"
     "wifi_log.c"
+    "spi_flash_bridge.c"
+    "fpga_bootloader.c"
     INCLUDE_DIRS "."
 )
 

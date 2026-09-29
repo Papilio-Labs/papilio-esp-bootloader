@@ -26,11 +26,14 @@
 #include "serial_flash.h"
 #include "http_server.h"
 #include "jtag_gowin.h"
+#include "spi_flash_bridge.h"
+#include "fpga_bootloader.h"
 
 static const char *TAG = "serial_flash";
 
 #define SERIAL_FLASH_CHUNK         4096
 #define SERIAL_FLASH_MAX_SRAM_SIZE (2 * 1024 * 1024)  /* generous cap for a Gowin bitstream */
+#define SERIAL_FLASH_FLASH_ADDR    0x000000  /* must match http_server.c's FPGA_FLASH_ADDR */
 #define SERIAL_FLASH_MAX_APP_SIZE  (2 * 1024 * 1024)  /* larger than any ota_0/ota_1 slot */
 #define SERIAL_FLASH_STALL_MS      30000
 #define SERIAL_FLASH_EOF_DELAY_MS  20
@@ -207,6 +210,80 @@ static esp_err_t serial_flash_write_sram(size_t size)
 }
 
 /* =========================================================================
+ * target=flash — stream bytes into the FPGA's own persistent SPI flash.
+ * Mirrors http_server.c's handle_fpga_update(), just fed by
+ * read_raw_bytes() instead of httpd_req_recv().
+ *
+ * Emits PROGRESS after EVERY SERIAL_FLASH_CHUNK-sized (4096 byte) write,
+ * not periodically like serial_flash_write_sram() above -- the host side
+ * (fpga-serial.ts) deliberately waits for a PROGRESS ack after each 4 KB
+ * chunk before sending the next one when target=="flash", since each
+ * chunk triggers a real (slower) SPI flash page write rather than a fast
+ * JTAG shift.
+ * ========================================================================= */
+
+static esp_err_t serial_flash_write_flash(size_t size)
+{
+    ESP_LOGI(TAG, "Serial FPGA persistent flash program: %zu bytes", size);
+
+    esp_err_t err = fpga_bootloader_load_to_sram();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to load bootloader to FPGA SRAM: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(1500));
+
+    err = spi_flash_bridge_reinit();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "SPI flash not accessible after SRAM bootloader load: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    spi_flash_bridge_lock();
+    spi_flash_bridge_erase_region(SERIAL_FLASH_FLASH_ADDR, (uint32_t)size);
+
+    uint8_t *buf = malloc(SERIAL_FLASH_CHUNK);
+    if (!buf) {
+        spi_flash_bridge_unlock();
+        return ESP_ERR_NO_MEM;
+    }
+
+    size_t   remaining = size;
+    size_t   received  = 0;
+    uint32_t addr      = SERIAL_FLASH_FLASH_ADDR;
+    esp_err_t write_err = ESP_OK;
+
+    while (remaining > 0) {
+        size_t to_read = remaining < SERIAL_FLASH_CHUNK ? remaining : SERIAL_FLASH_CHUNK;
+        if (!read_raw_bytes(buf, to_read)) {
+            ESP_LOGE(TAG, "Serial read stalled after %zu / %zu bytes", received, size);
+            write_err = ESP_ERR_TIMEOUT;
+            break;
+        }
+
+        spi_flash_bridge_write(addr, buf, to_read);
+        addr      += to_read;
+        remaining -= to_read;
+        received  += to_read;
+
+        printf("PROGRESS %zu\r\n", received);
+        fflush(stdout);
+    }
+
+    free(buf);
+    spi_flash_bridge_unlock();
+
+    if (write_err == ESP_OK) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+        spi_flash_bridge_fpga_reset();
+        ESP_LOGI(TAG, "Serial FPGA persistent flash programming complete! (%zu bytes)", received);
+    }
+
+    return write_err;
+}
+
+/* =========================================================================
  * ESP32 app image — stream bytes into whichever ota_0/ota_1 slot is
  * inactive, then boot into it. Mirrors http_server.c's handle_update(),
  * just fed by read_raw_bytes() instead of httpd_req_recv().
@@ -308,9 +385,9 @@ static bool try_handle_fpga_flash_begin(const char *line)
         return true;
     }
 
-    if (strcmp(target, "sram") != 0) {
-        /* target=flash (persistent SPI) isn't wired up yet -- the loader has
-         * no mcu_hw SPI-flash bridge ported (unlike FPGA-Companion). */
+    bool is_sram  = (strcmp(target, "sram") == 0);
+    bool is_flash = (strcmp(target, "flash") == 0);
+    if (!is_sram && !is_flash) {
         printf("\r\nFPGA_FLASH_ERROR bad_target\r\n");
         fflush(stdout);
         return true;
@@ -328,7 +405,7 @@ static bool try_handle_fpga_flash_begin(const char *line)
 
     usb_serial_jtag_vfs_set_rx_line_endings(ESP_LINE_ENDINGS_LF);
     io_begin();
-    esp_err_t err = serial_flash_write_sram(size);
+    esp_err_t err = is_flash ? serial_flash_write_flash(size) : serial_flash_write_sram(size);
     io_end();
     usb_serial_jtag_vfs_set_rx_line_endings(CONSOLE_DEFAULT_RX_LINE_ENDINGS);
 
