@@ -12,8 +12,9 @@ project with the standalone public repository:
 - Bitstream size: 577,178 bytes.
 - Updated `generate_bootloader_header.py` to use the sibling
   `../papilio_spi_bridge/impl/pnr/project.bin` path.
-- Regenerated `main/bootloader_data.h` using raw deflate compression.
-- Compressed payload size: 5,197 bytes.
+- Regenerated `main/bootloader_data.h` from the merged `main` branch using
+  raw deflate compression.
+- Compressed payload size: 9,295 bytes.
 - ESP-IDF build completed successfully with ESP-IDF v6.0.1.
 
 ## Hardware upload
@@ -41,3 +42,15 @@ The updated firmware accepted both tested 577,178-byte FPGA images through
 Both color changes were visible on the physical board without a power cycle.
 This confirms the standalone bridge, embedded bitstream, ESP32 firmware, SPI
 flash write path, and runtime FPGA reconfiguration path work together.
+
+## RGB blink integration
+
+The bridge `experiment/purple-rgb-blink` branch was tested in SRAM and then
+merged into `main`. The WS2812B output on `P9` now shows dim purple for one
+second and turns off for one second. The ESP bootloader embeds this merged
+bridge image so the behavior is also available whenever it preloads the bridge
+for an FPGA flash update.
+
+The integrated bridge was loaded through `POST /fpga-jtag-sram`, persisted
+through `POST /fpga-update`, and continued to report JEDEC `0x0b4017` with an
+8 MiB flash after reconfiguration.
