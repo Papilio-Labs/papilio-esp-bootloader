@@ -28,12 +28,16 @@
  *   Device -> Host:  PROGRESS <bytes>\r\n        (periodically)
  *   Device -> Host:  APP_FLASH_OK\r\n             (or APP_FLASH_ERROR <reason>\r\n)
  *                     then the board reboots into the newly flashed slot.
+ *
+ *   Host -> Device:  RESUME_APP\n
+ *   Device -> Host:  RESUME_OK\r\n              (or RESUME_ERROR <reason>\r\n)
+ *                     then the board reboots into the existing user app.
  */
 
 /**
  * Start the background console task that reads lines from stdin (the USB
- * Serial/JTAG console) and dispatches FPGA_FLASH_BEGIN / APP_FLASH_BEGIN
- * commands. Safe to call once at boot, alongside loader_http_server_start().
+ * Serial/JTAG console) and dispatches flash/resume commands. Safe to call once
+ * at boot, alongside loader_http_server_start().
  */
 void serial_flash_start(void);
 

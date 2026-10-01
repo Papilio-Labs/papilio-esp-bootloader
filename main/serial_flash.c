@@ -460,6 +460,34 @@ static bool try_handle_app_flash_begin(const char *line)
     return true;
 }
 
+static bool try_handle_resume_app(const char *line)
+{
+    if (strcmp(line, "RESUME_APP") != 0) return false;
+
+    const esp_partition_t *target = loader_get_resume_partition();
+    uint8_t magic = 0;
+    if (!target || esp_partition_read(target, 0, &magic, 1) != ESP_OK || magic != 0xE9) {
+        printf("RESUME_ERROR no_valid_app\r\n");
+        fflush(stdout);
+        return true;
+    }
+
+    esp_err_t err = esp_ota_set_boot_partition(target);
+    if (err != ESP_OK) {
+        printf("RESUME_ERROR %s\r\n", esp_err_to_name(err));
+        fflush(stdout);
+        return true;
+    }
+
+    loader_save_last_slot((uint8_t)(target->subtype - ESP_PARTITION_SUBTYPE_APP_OTA_0));
+    printf("RESUME_OK\r\n");
+    fflush(stdout);
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    loader_led_clear();
+    esp_restart();
+    return true;
+}
+
 /* Blocks reading one newline-terminated line from stdin. getchar() is
  * expected to block until a byte arrives, but some VFS backends return EOF
  * immediately when no console is attached -- back off briefly on EOF rather
@@ -495,6 +523,7 @@ static void serial_console_task(void *arg)
 
         if (try_handle_fpga_flash_begin(line)) continue;
         if (try_handle_app_flash_begin(line)) continue;
+        if (try_handle_resume_app(line)) continue;
     }
 }
 

@@ -43,6 +43,14 @@ Both color changes were visible on the physical board without a power cycle.
 This confirms the standalone bridge, embedded bitstream, ESP32 firmware, SPI
 flash write path, and runtime FPGA reconfiguration path work together.
 
+On September 29, 2026, the loader was restored over native USB Serial/JTAG on
+`COM10` and `green_led.bin` was written through the same endpoint. DHCP assigned
+the loader `10.0.4.100` for this run and the request returned HTTP 200. After a
+physical power removal and reapplication, the green FPGA image returned without
+another loader update, confirming persistent FPGA SPI-flash programming across
+a real cold boot. USB-serial persistent flashing and interrupted-write recovery
+remain separate validation items.
+
 ## RGB blink integration
 
 The bridge `experiment/purple-rgb-blink` branch was tested in SRAM and then
