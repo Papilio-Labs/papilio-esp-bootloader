@@ -8,5 +8,6 @@ sdkconfig.defaults.local
 # Local test/debug artifacts from hardware validation sessions
 boot_capture.log
 otadata_*.bin
+release_v*/
 serial_flash_test.py
 udp_log_listen.py
