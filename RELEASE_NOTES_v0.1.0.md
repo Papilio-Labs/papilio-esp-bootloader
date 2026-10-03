@@ -18,9 +18,12 @@ the `factory` partition. The companion application must fit within the
 
 ## Migration
 
-Existing pre-Phase-6 boards must be migrated once by USB using the merged
-image published with `FPGA-Companion v2.0.0`. Do not update the loader through
-the normal application OTA path: the `factory` partition has no A/B fallback.
+Boards using the previous application-centered OTA design must be migrated
+once by USB using the merged image published with `FPGA-Companion v2.0.0`.
+After migration, the loader lives in the `factory` partition and can be
+started independently of whichever user application is installed. Do not
+update the loader through the normal application OTA path: the `factory`
+partition has no A/B fallback.
 
 ## Validation
 
