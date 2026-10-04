@@ -11,3 +11,7 @@ otadata_*.bin
 release_v*/
 serial_flash_test.py
 udp_log_listen.py
+
+# Generated from sdkconfig.defaults (+ gitignored sdkconfig.defaults.local); never commit -- it embeds local WiFi credentials
+sdkconfig
+build_release/
