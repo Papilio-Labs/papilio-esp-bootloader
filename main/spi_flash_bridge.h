@@ -41,8 +41,11 @@ void spi_flash_bridge_init(void);
 /**
  * Probe and initialize the external flash chip. The FPGA's SPI bridge
  * (temporary JTAG-SRAM bootloader, or the user's own bitstream) must
- * already be running. Retries internally (chip needs a moment to settle
- * after the bridge bitstream starts running) -- see spi_flash_bridge.c.
+ * already be running. Before probing, restores standard SPI mode and sends
+ * the JEDEC software-reset sequence; this is required after cores such as
+ * C64Nano leave the shared flash in dual-I/O continuous-read mode. Retries
+ * internally (chip needs a moment to settle after the bridge bitstream starts
+ * running) -- see spi_flash_bridge.c.
  */
 esp_err_t spi_flash_bridge_reinit(void);
 

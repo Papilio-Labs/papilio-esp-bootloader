@@ -34,6 +34,7 @@ static const char *TAG = "spi_flash_bridge";
 #define PIN_NUM_RECONFIG_N 13
 
 static esp_flash_t *s_ext_flash = NULL;
+static spi_device_handle_t s_bridge_spi = NULL;
 static bool s_ext_flash_ready = false;
 static volatile bool s_spi_bus_ready = false;
 static SemaphoreHandle_t s_flash_mutex = NULL;
@@ -79,16 +80,81 @@ void spi_flash_bridge_init(void)
     };
     spi_bus_initialize(SPI_HOST_ID, &buscfg, SPI_DMA_CH_AUTO);
 
+    /* Raw mode-1 device used to reset the chip before the esp_flash probe.
+     * CS is toggled manually so the 16-bit mode-exit and JEDEC reset commands
+     * each get a separate transaction. */
+    spi_device_interface_config_t bridge_dev_cfg = {
+        .clock_speed_hz = 10 * 1000 * 1000,
+        .mode = 1,
+        .spics_io_num = -1,
+        .command_bits = 0,
+        .address_bits = 0,
+        .dummy_bits = 0,
+        .queue_size = 1,
+    };
+    esp_err_t err = spi_bus_add_device(SPI_HOST_ID, &bridge_dev_cfg, &s_bridge_spi);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "spi_bus_add_device for flash reset failed: %s", esp_err_to_name(err));
+        return;
+    }
+
     /* Registered now, but not probed (esp_flash_init) -- the FPGA SPI bridge
      * isn't running yet this early at boot. Actual probing happens in
      * spi_flash_bridge_reinit(), called after the bridge bitstream is
      * loaded to SRAM via JTAG. */
-    esp_err_t err = spi_bus_add_flash_device(&s_ext_flash, &s_flash_device_cfg);
+    err = spi_bus_add_flash_device(&s_ext_flash, &s_flash_device_cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "spi_bus_add_flash_device failed: %s", esp_err_to_name(err));
         return;
     }
     s_spi_bus_ready = true;
+}
+
+static esp_err_t reset_external_flash(void)
+{
+    if (!s_bridge_spi || !s_flash_mutex) return ESP_ERR_INVALID_STATE;
+
+    uint8_t ignored_rx[4] = { 0 };
+    spi_transaction_t trans = {
+        .flags = SPI_TRANS_USE_TXDATA,
+        .rx_buffer = ignored_rx,
+    };
+
+    xSemaphoreTake(s_flash_mutex, portMAX_DELAY);
+    gpio_set_direction(PIN_NUM_FLASH_CS, GPIO_MODE_OUTPUT);
+    gpio_set_level(PIN_NUM_FLASH_CS, 1);
+
+    /* Match flash_dspi.v: 16 ones with CS asserted exits continuous-read mode. */
+    trans.length = 16;
+    trans.rxlength = 16;
+    trans.tx_data[0] = 0xff;
+    trans.tx_data[1] = 0xff;
+    gpio_set_level(PIN_NUM_FLASH_CS, 0);
+    esp_err_t err = spi_device_polling_transmit(s_bridge_spi, &trans);
+    gpio_set_level(PIN_NUM_FLASH_CS, 1);
+
+    if (err == ESP_OK) {
+        /* JEDEC reset-enable and reset must be separate transactions. */
+        trans.length = 8;
+        trans.rxlength = 8;
+        trans.tx_data[0] = 0x66;
+        gpio_set_level(PIN_NUM_FLASH_CS, 0);
+        err = spi_device_polling_transmit(s_bridge_spi, &trans);
+        gpio_set_level(PIN_NUM_FLASH_CS, 1);
+    }
+
+    if (err == ESP_OK) {
+        trans.tx_data[0] = 0x99;
+        gpio_set_level(PIN_NUM_FLASH_CS, 0);
+        err = spi_device_polling_transmit(s_bridge_spi, &trans);
+        gpio_set_level(PIN_NUM_FLASH_CS, 1);
+    }
+
+    xSemaphoreGive(s_flash_mutex);
+    if (err == ESP_OK) {
+        esp_rom_delay_us(3000);
+    }
+    return err;
 }
 
 esp_err_t spi_flash_bridge_reinit(void)
@@ -102,6 +168,12 @@ esp_err_t spi_flash_bridge_reinit(void)
     }
 
     s_ext_flash_ready = false;
+
+    esp_err_t reset_err = reset_external_flash();
+    if (reset_err != ESP_OK) {
+        ESP_LOGE(TAG, "External flash reset failed: %s", esp_err_to_name(reset_err));
+        return reset_err;
+    }
 
     for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
         /* Full remove+re-add for a clean handle -- field-clearing alone
