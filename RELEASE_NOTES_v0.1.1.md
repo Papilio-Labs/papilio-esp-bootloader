@@ -9,6 +9,8 @@ boards.
   active, while keeping serial progress and completion/error responses available.
 - Reset the external FPGA SPI flash before probing it.
 - Preserve the existing 4 MB factory/OTA partition layout.
+- The loader app occupies 913,872 bytes of the 917,504-byte factory partition,
+  leaving 3,632 bytes free.
 
 ## Validation
 
