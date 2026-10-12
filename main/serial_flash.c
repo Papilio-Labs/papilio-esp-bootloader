@@ -29,6 +29,7 @@
 #include "spi_flash_bridge.h"
 #include "fpga_bootloader.h"
 #include "loader_led.h"
+#include "wifi_log.h"
 
 static const char *TAG = "serial_flash";
 
@@ -404,11 +405,13 @@ static bool try_handle_fpga_flash_begin(const char *line)
     printf("\r\nREADY\r\n");
     fflush(stdout);
 
+    wifi_log_flash_begin();
     usb_serial_jtag_vfs_set_rx_line_endings(ESP_LINE_ENDINGS_LF);
     io_begin();
     esp_err_t err = is_flash ? serial_flash_write_flash(size) : serial_flash_write_sram(size);
     io_end();
     usb_serial_jtag_vfs_set_rx_line_endings(CONSOLE_DEFAULT_RX_LINE_ENDINGS);
+    wifi_log_flash_end();
 
     if (err == ESP_OK) {
         printf("FPGA_FLASH_OK\r\n");
@@ -441,11 +444,13 @@ static bool try_handle_app_flash_begin(const char *line)
     printf("\r\nREADY\r\n");
     fflush(stdout);
 
+    wifi_log_flash_begin();
     usb_serial_jtag_vfs_set_rx_line_endings(ESP_LINE_ENDINGS_LF);
     io_begin();
     esp_err_t err = serial_flash_write_app(size);
     io_end();
     usb_serial_jtag_vfs_set_rx_line_endings(CONSOLE_DEFAULT_RX_LINE_ENDINGS);
+    wifi_log_flash_end();
 
     if (err == ESP_OK) {
         printf("APP_FLASH_OK\r\n");

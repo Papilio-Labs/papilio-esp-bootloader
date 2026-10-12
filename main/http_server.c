@@ -32,6 +32,7 @@
 #include "spi_flash_bridge.h"
 #include "fpga_bootloader.h"
 #include "loader_led.h"
+#include "wifi_log.h"
 
 static const char *TAG = "http_server";
 
@@ -288,9 +289,11 @@ static esp_err_t handle_update(httpd_req_t *req)
 
     ESP_LOGI(TAG, "App update started: %d bytes -> partition '%s'", req->content_len, target->label);
 
+    wifi_log_flash_begin();
     esp_ota_handle_t ota_handle = 0;
     esp_err_t err = esp_ota_begin(target, OTA_WITH_SEQUENTIAL_WRITES, &ota_handle);
     if (err != ESP_OK) {
+        wifi_log_flash_end();
         ESP_LOGE(TAG, "esp_ota_begin: %s", esp_err_to_name(err));
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA begin failed");
         return ESP_FAIL;
@@ -299,6 +302,7 @@ static esp_err_t handle_update(httpd_req_t *req)
     char *buf = malloc(RECV_CHUNK_SIZE);
     if (!buf) {
         esp_ota_abort(ota_handle);
+        wifi_log_flash_end();
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
         return ESP_FAIL;
     }
@@ -315,6 +319,7 @@ static esp_err_t handle_update(httpd_req_t *req)
             continue;
         }
         if (recv <= 0) {
+            wifi_log_flash_end();
             ESP_LOGE(TAG, "Receive error (%d)", recv);
             free(buf);
             esp_ota_abort(ota_handle);
@@ -325,6 +330,7 @@ static esp_err_t handle_update(httpd_req_t *req)
         /* Validate image magic on first chunk, same check FPGA-Companion's ota_server.c uses. */
         if (!hdr_ok) {
             if ((uint8_t)buf[0] != 0xE9) {
+                wifi_log_flash_end();
                 ESP_LOGE(TAG, "Invalid image magic 0x%02x (expected 0xE9)", (uint8_t)buf[0]);
                 free(buf);
                 esp_ota_abort(ota_handle);
@@ -336,6 +342,7 @@ static esp_err_t handle_update(httpd_req_t *req)
 
         err = esp_ota_write(ota_handle, buf, recv);
         if (err != ESP_OK) {
+            wifi_log_flash_end();
             ESP_LOGE(TAG, "esp_ota_write: %s", esp_err_to_name(err));
             free(buf);
             esp_ota_abort(ota_handle);
@@ -351,6 +358,7 @@ static esp_err_t handle_update(httpd_req_t *req)
 
     err = esp_ota_end(ota_handle);
     if (err != ESP_OK) {
+        wifi_log_flash_end();
         ESP_LOGE(TAG, "esp_ota_end: %s", esp_err_to_name(err));
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Image validation failed");
         return ESP_FAIL;
@@ -358,12 +366,14 @@ static esp_err_t handle_update(httpd_req_t *req)
 
     err = esp_ota_set_boot_partition(target);
     if (err != ESP_OK) {
+        wifi_log_flash_end();
         ESP_LOGE(TAG, "esp_ota_set_boot_partition: %s", esp_err_to_name(err));
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Set boot partition failed");
         return ESP_FAIL;
     }
     loader_save_last_slot((uint8_t)(target->subtype - ESP_PARTITION_SUBTYPE_APP_OTA_0));
 
+    wifi_log_flash_end();
     ESP_LOGI(TAG, "App update complete (%d bytes) -> '%s'. Rebooting in 1 s ...", written, target->label);
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_sendstr(req, "App update successful. Rebooting into new slot...\r\n");
@@ -428,9 +438,11 @@ static esp_err_t handle_fpga_jtag_sram(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    wifi_log_flash_begin();
     ESP_LOGI(TAG, "FPGA JTAG SRAM programming started: %d bytes", req->content_len);
 
     if (loader_jtag_ensure_init() != ESP_OK) {
+        wifi_log_flash_end();
         ESP_LOGE(TAG, "JTAG initialization failed");
         loader_jtag_unlock();
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "JTAG init failed");
@@ -440,6 +452,7 @@ static esp_err_t handle_fpga_jtag_sram(httpd_req_t *req)
     uint32_t idcode = 0;
     esp_err_t begin_err = loader_jtag_program_sram_begin_with_retry(&idcode);
     if (begin_err != ESP_OK) {
+        wifi_log_flash_end();
         ESP_LOGE(TAG, "Failed to begin JTAG programming (FPGA not detected?)");
         loader_jtag_unlock();
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "FPGA not detected via JTAG");
@@ -448,6 +461,7 @@ static esp_err_t handle_fpga_jtag_sram(httpd_req_t *req)
 
     char *chunk_buf = malloc(RECV_CHUNK_SIZE);
     if (!chunk_buf) {
+        wifi_log_flash_end();
         loader_jtag_unlock();
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
         return ESP_FAIL;
@@ -483,18 +497,21 @@ static esp_err_t handle_fpga_jtag_sram(httpd_req_t *req)
     free(chunk_buf);
 
     if (error) {
+        wifi_log_flash_end();
         loader_jtag_unlock();
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Programming failed");
         return ESP_FAIL;
     }
 
     if (jtag_gowin_program_sram_end() != ESP_OK) {
+        wifi_log_flash_end();
         ESP_LOGE(TAG, "JTAG programming end failed");
         loader_jtag_unlock();
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Programming failed");
         return ESP_FAIL;
     }
 
+    wifi_log_flash_end();
     ESP_LOGI(TAG, "FPGA JTAG SRAM programming complete! (%d bytes)", received);
     loader_jtag_unlock();
 
@@ -532,11 +549,13 @@ static esp_err_t handle_fpga_update(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    wifi_log_flash_begin();
     ESP_LOGI(TAG, "FPGA persistent flash update started: %d bytes -> flash @ 0x%06x",
              req->content_len, FPGA_FLASH_ADDR);
 
     char *buf = malloc(FPGA_FLASH_BUF);
     if (!buf) {
+        wifi_log_flash_end();
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
         return ESP_FAIL;
     }
@@ -544,6 +563,7 @@ static esp_err_t handle_fpga_update(httpd_req_t *req)
     ESP_LOGI(TAG, "Pre-loading embedded bootloader to FPGA SRAM");
     if (fpga_bootloader_load_to_sram() != ESP_OK) {
         free(buf);
+        wifi_log_flash_end();
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to load bootloader to FPGA SRAM");
         return ESP_FAIL;
     }
@@ -554,6 +574,7 @@ static esp_err_t handle_fpga_update(httpd_req_t *req)
     ESP_LOGI(TAG, "Re-initializing SPI flash (FPGA SPI bridge now active)");
     if (spi_flash_bridge_reinit() != ESP_OK) {
         free(buf);
+        wifi_log_flash_end();
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "SPI flash not accessible after SRAM bootloader load");
         return ESP_FAIL;
     }
@@ -575,6 +596,7 @@ static esp_err_t handle_fpga_update(httpd_req_t *req)
         if (recv == HTTPD_SOCK_ERR_TIMEOUT) {
             timeout_streak++;
             if (timeout_streak >= 3) {
+                wifi_log_flash_end();
                 ESP_LOGE(TAG, "Connection stalled after %d bytes -- aborting", written);
                 free(buf);
                 spi_flash_bridge_unlock();
@@ -587,6 +609,7 @@ static esp_err_t handle_fpga_update(httpd_req_t *req)
         timeout_streak = 0;
 
         if (recv <= 0) {
+            wifi_log_flash_end();
             ESP_LOGE(TAG, "Receive error (%d) after %d bytes written", recv, written);
             free(buf);
             spi_flash_bridge_unlock();
@@ -612,6 +635,7 @@ static esp_err_t handle_fpga_update(httpd_req_t *req)
     vTaskDelay(pdMS_TO_TICKS(500));
 
     spi_flash_bridge_fpga_reset();
+    wifi_log_flash_end();
     ESP_LOGI(TAG, "FPGA reconfiguring from new persistent bitstream");
 
     httpd_resp_set_type(req, "text/plain");

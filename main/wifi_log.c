@@ -7,6 +7,7 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <stdarg.h>
 
 #include <reent.h>  /* struct _reent for __wrap__write_r */
 
@@ -30,6 +31,16 @@ static int                s_udp_sock    = -1;
 static struct sockaddr_in s_dest_addr;
 static RingbufHandle_t    s_ringbuf     = NULL;
 static TaskHandle_t       s_sender_task = NULL;
+static vprintf_like_t     s_original_vprintf;
+static portMUX_TYPE      s_flash_mux    = portMUX_INITIALIZER_UNLOCKED;
+static unsigned int      s_flash_count  = 0;
+static volatile bool     s_flash_active = false;
+
+static int quiet_vprintf(const char *format, va_list args)
+{
+    if (s_flash_active) return 0;
+    return s_original_vprintf(format, args);
+}
 
 /* Drains the ring buffer and sends UDP packets in its own task context so
  * __wrap__write_r never blocks on network I/O. Wakes on notification from
@@ -43,6 +54,14 @@ static void udp_sender_task(void *arg)
 
         size_t   item_size;
         uint8_t *item;
+        if (s_flash_active) {
+            while ((item = (uint8_t *)xRingbufferReceiveUpTo(
+                            s_ringbuf, &item_size, 0, WIFI_LOG_UDP_CHUNK)) != NULL) {
+                vRingbufferReturnItem(s_ringbuf, item);
+            }
+            continue;
+        }
+
         while ((item = (uint8_t *)xRingbufferReceiveUpTo(
                         s_ringbuf, &item_size, 0, WIFI_LOG_UDP_CHUNK)) != NULL) {
             sendto(s_udp_sock, item, item_size, 0,
@@ -61,7 +80,7 @@ ssize_t __wrap__write_r(struct _reent *r, int fd, const void *buf, size_t nbytes
 {
     ssize_t ret = __real__write_r(r, fd, buf, nbytes);
 
-    if ((fd == 1 || fd == 2) && nbytes > 0 && s_ringbuf
+    if ((fd == 1 || fd == 2) && nbytes > 0 && s_ringbuf && !s_flash_active
             && xTaskGetSchedulerState() == taskSCHEDULER_RUNNING) {
         if (xRingbufferSend(s_ringbuf, buf, nbytes, 0) == pdTRUE && s_sender_task) {
             xTaskNotifyGive(s_sender_task);
@@ -72,6 +91,7 @@ ssize_t __wrap__write_r(struct _reent *r, int fd, const void *buf, size_t nbytes
 
 void wifi_log_early_init(void)
 {
+    s_original_vprintf = esp_log_set_vprintf(quiet_vprintf);
     s_ringbuf = xRingbufferCreate(WIFI_LOG_RING_BUF_BYTES, RINGBUF_TYPE_BYTEBUF);
     xTaskCreate(udp_sender_task, "udp_log", 4096, NULL, 5, &s_sender_task);
 }
@@ -97,4 +117,21 @@ void wifi_log_start(void)
 
     ESP_LOGI(TAG, "WiFi UDP logging active - listen with: ncat -u -l %d  (or nc -u -l -p %d)",
              WIFI_LOG_UDP_PORT, WIFI_LOG_UDP_PORT);
+}
+
+void wifi_log_flash_begin(void)
+{
+    portENTER_CRITICAL(&s_flash_mux);
+    s_flash_count++;
+    s_flash_active = true;
+    portEXIT_CRITICAL(&s_flash_mux);
+}
+
+void wifi_log_flash_end(void)
+{
+    portENTER_CRITICAL(&s_flash_mux);
+    configASSERT(s_flash_count > 0);
+    s_flash_count--;
+    s_flash_active = (s_flash_count > 0);
+    portEXIT_CRITICAL(&s_flash_mux);
 }

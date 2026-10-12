@@ -27,4 +27,11 @@ void wifi_log_early_init(void);
  */
 void wifi_log_start(void);
 
+/**
+ * Suppress ESP_LOG output and UDP forwarding while one or more flash
+ * transfers are active. Direct serial protocol messages remain available.
+ */
+void wifi_log_flash_begin(void);
+void wifi_log_flash_end(void);
+
 #endif /* LOADER_WIFI_LOG_H */
