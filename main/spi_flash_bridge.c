@@ -275,7 +275,7 @@ void spi_flash_bridge_fpga_reset(void)
     /* The bridge LED is a latched WS2812 state. Pull its sideband low long
      * enough for the bridge to transmit a complete zero-color frame. */
     gpio_set_level(PIN_NUM_LED_CLEAR_N, 0);
-    vTaskDelay(pdMS_TO_TICKS(5));
+    vTaskDelay(pdMS_TO_TICKS(20));  /* >= 1 tick at 100 Hz; a zero frame plus latch takes ~1 ms */
 
     gpio_set_direction(PIN_NUM_RECONFIG_N, GPIO_MODE_OUTPUT);
     gpio_set_level(PIN_NUM_RECONFIG_N, 0);
