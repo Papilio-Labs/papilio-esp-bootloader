@@ -243,7 +243,11 @@ static esp_err_t serial_flash_write_flash(size_t size)
     }
 
     spi_flash_bridge_lock();
-    spi_flash_bridge_erase_region(SERIAL_FLASH_FLASH_ADDR, (uint32_t)size);
+    err = spi_flash_bridge_erase_region(SERIAL_FLASH_FLASH_ADDR, (uint32_t)size);
+    if (err != ESP_OK) {
+        spi_flash_bridge_unlock();
+        return err;
+    }
 
     uint8_t *buf = malloc(SERIAL_FLASH_CHUNK);
     if (!buf) {
@@ -264,7 +268,8 @@ static esp_err_t serial_flash_write_flash(size_t size)
             break;
         }
 
-        spi_flash_bridge_write(addr, buf, to_read);
+        write_err = spi_flash_bridge_write(addr, buf, to_read);
+        if (write_err != ESP_OK) break;
         addr      += to_read;
         remaining -= to_read;
         received  += to_read;

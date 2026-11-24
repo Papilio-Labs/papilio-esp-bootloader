@@ -18,6 +18,7 @@
 #include "esp_err.h"
 #include "esp_flash.h"
 #include "esp_flash_spi_init.h"
+#include "spi_flash_mmap.h"
 #include "esp_log.h"
 #include "esp_rom_sys.h"
 
@@ -233,23 +234,50 @@ esp_err_t spi_flash_bridge_read_id(uint32_t *id, uint32_t *size_bytes)
  * enough to trip the task watchdog. Erase in chunks and yield between them. */
 #define ERASE_CHUNK_SIZE 65536
 
-void spi_flash_bridge_erase_region(uint32_t addr, uint32_t size)
+esp_err_t spi_flash_bridge_erase_region(uint32_t addr, uint32_t size)
 {
-    if (ensure_flash_ready() != ESP_OK) return;
+    if (addr % SPI_FLASH_SEC_SIZE != 0 || size == 0 ||
+        size > UINT32_MAX - (SPI_FLASH_SEC_SIZE - 1)) {
+        ESP_LOGE(TAG, "Invalid flash erase range: addr=0x%" PRIx32 ", size=%" PRIu32, addr, size);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_err_t err = ensure_flash_ready();
+    if (err != ESP_OK) return err;
+
+    /* A raw bitstream usually ends partway through its final erase sector. */
+    size = (size + SPI_FLASH_SEC_SIZE - 1) & ~(SPI_FLASH_SEC_SIZE - 1);
+    uint32_t flash_size = 0;
+    err = esp_flash_get_size(s_ext_flash, &flash_size);
+    if (err != ESP_OK) return err;
+    if (addr > flash_size || size > flash_size - addr) {
+        ESP_LOGE(TAG, "Flash erase range exceeds chip capacity");
+        return ESP_ERR_INVALID_ARG;
+    }
 
     uint32_t offset = 0;
     while (offset < size) {
         uint32_t chunk = (size - offset < ERASE_CHUNK_SIZE) ? (size - offset) : ERASE_CHUNK_SIZE;
-        esp_flash_erase_region(s_ext_flash, addr + offset, chunk);
+        err = esp_flash_erase_region(s_ext_flash, addr + offset, chunk);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Flash erase failed at 0x%" PRIx32 ": %s", addr + offset, esp_err_to_name(err));
+            return err;
+        }
         offset += chunk;
         vTaskDelay(1);  /* let the idle task run so the watchdog is fed */
     }
+    return ESP_OK;
 }
 
-void spi_flash_bridge_write(uint32_t addr, const uint8_t *data, uint32_t size)
+esp_err_t spi_flash_bridge_write(uint32_t addr, const uint8_t *data, uint32_t size)
 {
-    if (ensure_flash_ready() != ESP_OK) return;
-    esp_flash_write(s_ext_flash, data, addr, size);
+    esp_err_t err = ensure_flash_ready();
+    if (err != ESP_OK) return err;
+    err = esp_flash_write(s_ext_flash, data, addr, size);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Flash write failed at 0x%" PRIx32 ": %s", addr, esp_err_to_name(err));
+    }
+    return err;
 }
 
 void spi_flash_bridge_read(uint32_t addr, uint8_t *data, uint32_t size)

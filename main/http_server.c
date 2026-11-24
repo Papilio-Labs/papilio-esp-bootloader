@@ -582,7 +582,14 @@ static esp_err_t handle_fpga_update(httpd_req_t *req)
     spi_flash_bridge_lock();
 
     ESP_LOGI(TAG, "Erasing flash region @ 0x%06x (%d bytes)", FPGA_FLASH_ADDR, FPGA_FLASH_SIZE);
-    spi_flash_bridge_erase_region(FPGA_FLASH_ADDR, FPGA_FLASH_SIZE);
+    esp_err_t err = spi_flash_bridge_erase_region(FPGA_FLASH_ADDR, FPGA_FLASH_SIZE);
+    if (err != ESP_OK) {
+        free(buf);
+        spi_flash_bridge_unlock();
+        wifi_log_flash_end();
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "FPGA flash erase failed");
+        return ESP_FAIL;
+    }
 
     int remaining = req->content_len;
     int written = 0;
@@ -618,7 +625,14 @@ static esp_err_t handle_fpga_update(httpd_req_t *req)
             return ESP_FAIL;
         }
 
-        spi_flash_bridge_write(addr, (uint8_t *)buf, recv);
+        err = spi_flash_bridge_write(addr, (uint8_t *)buf, recv);
+        if (err != ESP_OK) {
+            free(buf);
+            spi_flash_bridge_unlock();
+            wifi_log_flash_end();
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "FPGA flash write failed");
+            return ESP_FAIL;
+        }
         addr      += recv;
         remaining -= recv;
         written   += recv;

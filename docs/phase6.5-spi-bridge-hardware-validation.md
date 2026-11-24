@@ -62,3 +62,41 @@ for an FPGA flash update.
 The integrated bridge was loaded through `POST /fpga-jtag-sram`, persisted
 through `POST /fpga-update`, and continued to report JEDEC `0x0b4017` with an
 8 MiB flash after reconfiguration.
+
+## USB erase alignment regression (November 23, 2026)
+
+A 907,418-byte A2600 RetroCade image was acknowledged over USB, but Companion
+reported "FPGA not ready after 5 seconds!" and HDMI remained blank across
+power cycles. Writing the identical image over HTTP restored HDMI.
+
+The USB path passed the raw image length to the erase helper, leaving its
+final erase chunk unaligned to 4 KB. Erase and write errors were discarded.
+The helper now rounds the erase length up to a sector boundary (909,312 bytes
+for this image), checks capacity, and returns failures. Both USB and HTTP
+callers stop on erase/write errors without acknowledging success.
+
+Validation:
+
+- ESP-IDF 6.0.1 build passed and the image fits the factory partition.
+- Two full reads of the original factory partition produced identical SHA-256
+  hashes before updating only that partition. Esptool verified the new image's
+  write hash; the partition table, settings, and Companion app were not flashed.
+- The installed Papilio Loader v0.5.1 completed the same A2600 upload over USB
+  using the patched factory loader, without resetting OTA metadata.
+- Companion boot was observed, and the user confirmed A2600 HDMI was working.
+
+Follow-up cross-core checks with the patched loader and installed Papilio
+Loader v0.5.1:
+
+- USB: replaced A2600 with the 907,418-byte C64 RetroCade image; completion
+  was acknowledged, Companion boot was observed, and the user confirmed C64 HDMI.
+- Wi-Fi: replaced C64 with the 907,418-byte A2600 image; the HTTP success
+  response and Companion boot were observed, and the user confirmed A2600 HDMI.
+  The first network attempt timed out during loader identification before any
+  upload began. After a successful loader status probe, the retry completed.
+- Loader entry used Companion's network handoff; neither test reset OTA
+  metadata. The board was left running A2600 with Companion v2.2.2.
+
+The FPGA upload was protocol-acknowledged, not verified by full-image readback.
+Injected erase/write failures and interrupted-upload recovery were not tested
+on hardware.

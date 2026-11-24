@@ -52,14 +52,13 @@ esp_err_t spi_flash_bridge_reinit(void);
 /** Read the JEDEC ID and capacity after the bridge has been initialized. */
 esp_err_t spi_flash_bridge_read_id(uint32_t *id, uint32_t *size_bytes);
 
-/** Erase `size` bytes starting at `addr`, yielding between 64 KB chunks so a
- *  large erase doesn't trip the task watchdog. No-op (silently) if the
- *  flash isn't ready -- callers should check spi_flash_bridge_reinit()'s
- *  return value first. */
-void spi_flash_bridge_erase_region(uint32_t addr, uint32_t size);
+/** Erase from sector-aligned `addr`, rounding `size` up to a complete 4 KB
+ *  sector and yielding between 64 KB chunks. Returns the first error;
+ *  callers must stop before writing if the erase fails. */
+esp_err_t spi_flash_bridge_erase_region(uint32_t addr, uint32_t size);
 
-/** Write `size` bytes from `data` to the flash at `addr`. */
-void spi_flash_bridge_write(uint32_t addr, const uint8_t *data, uint32_t size);
+/** Write `size` bytes from `data` to the flash at `addr`, returning errors. */
+esp_err_t spi_flash_bridge_write(uint32_t addr, const uint8_t *data, uint32_t size);
 
 /** Read `size` bytes from the flash at `addr` into `data`. */
 void spi_flash_bridge_read(uint32_t addr, uint8_t *data, uint32_t size);
